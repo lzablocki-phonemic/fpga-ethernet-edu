@@ -1,0 +1,17 @@
+
+#Core cocotb framework
+cocotb>=1.8.0
+cocotb-bus>=0.2.1
+cocotb-test>=0.2.4
+
+#Test utilities
+pytest>=7.0
+pytest-xdist>=3.0
+
+#Numerical tools (useful for FIR verification)
+numpy>=1.23
+scipy>=1.9
+
+#Packet handling / debugging
+scapy>=2.5.0
+
