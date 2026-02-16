@@ -13,3 +13,11 @@
 
 # Python
 __pycache__/
+
+# Training useless fi,es
+training/sim_build
+training/*.xml
+training/venv
+
+#removed sims result
+ip/*/sim/*

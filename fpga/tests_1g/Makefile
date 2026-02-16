@@ -1,0 +1,92 @@
+# Makefile for fpga_core_1G_fifo cocotb testbench
+
+TOPLEVEL_LANG = verilog
+
+SIM ?= icarus
+WAVES ?= 0
+
+COCOTB_HDL_TIMEUNIT = 1ns
+COCOTB_HDL_TIMEPRECISION = 1ps
+
+DUT      = fpga_core_1G_fifo
+TOPLEVEL = $(DUT)
+MODULE   = test_$(DUT)
+
+# Project root (relative to fpga/tests_1g/)
+PROJ_ROOT = ../..
+
+# Source directories
+HDL_DIR     = $(PROJ_ROOT)/fpga/hdl
+APB_CFG_DIR = $(PROJ_ROOT)/ip/eth_apb/hdl
+APB_CFG_BASE_DIR = $(PROJ_ROOT)/ip/apb_configurator/hdl
+FIR_DIR     = $(PROJ_ROOT)/ip/fir/hdl
+ETH_LIB_DIR = $(PROJ_ROOT)/external/verilog-ethernet
+
+# Verilog sources
+VERILOG_SOURCES += $(HDL_DIR)/fpga_core_1G_fifo.v
+VERILOG_SOURCES += $(APB_CFG_DIR)/mac_udp_1G_apbConfig.v
+VERILOG_SOURCES += $(APB_CFG_BASE_DIR)/apb_configurator.v
+VERILOG_SOURCES += $(FIR_DIR)/fir_filter.v
+VERILOG_SOURCES += $(FIR_DIR)/fir_filter_apbConfig.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/rtl/eth_mac_1g_fifo.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/rtl/eth_mac_1g.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/rtl/axis_gmii_rx.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/rtl/axis_gmii_tx.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/rtl/lfsr.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/rtl/eth_axis_rx.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/rtl/eth_axis_tx.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/rtl/udp_complete.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/rtl/udp_checksum_gen.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/rtl/udp.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/rtl/udp_ip_rx.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/rtl/udp_ip_tx.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/rtl/ip_complete.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/rtl/ip.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/rtl/ip_eth_rx.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/rtl/ip_eth_tx.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/rtl/ip_arb_mux.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/rtl/arp.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/rtl/arp_cache.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/rtl/arp_eth_rx.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/rtl/arp_eth_tx.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/rtl/eth_arb_mux.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/lib/axis/rtl/arbiter.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/lib/axis/rtl/priority_encoder.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/lib/axis/rtl/axis_fifo.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/lib/axis/rtl/axis_async_fifo.v
+VERILOG_SOURCES += $(ETH_LIB_DIR)/lib/axis/rtl/axis_async_fifo_adapter.v
+
+# Simulation build output goes to ../sim
+SIM_BUILD ?= $(PWD)/../sim
+
+export COCOTB_RESULTS_FILE = $(SIM_BUILD)/results.xml
+
+ifeq ($(SIM), icarus)
+	PLUSARGS += -fst
+
+	ifeq ($(WAVES), 1)
+		VERILOG_SOURCES += iverilog_dump.v
+		COMPILE_ARGS += -s iverilog_dump
+	endif
+else ifeq ($(SIM), verilator)
+	COMPILE_ARGS += -Wno-SELRANGE -Wno-WIDTH
+
+	ifeq ($(WAVES), 1)
+		COMPILE_ARGS += --trace-fst
+	endif
+endif
+
+include $(shell cocotb-config --makefiles)/Makefile.sim
+
+iverilog_dump.v:
+	echo 'module iverilog_dump();' > $@
+	echo 'initial begin' >> $@
+	echo '    $$dumpfile("$(SIM_BUILD)/$(TOPLEVEL).fst");' >> $@
+	echo '    $$dumpvars(0, $(TOPLEVEL));' >> $@
+	echo 'end' >> $@
+	echo 'endmodule' >> $@
+
+clean::
+	@rm -rf iverilog_dump.v
+	@rm -rf dump.fst $(SIM_BUILD)/$(TOPLEVEL).fst $(TOPLEVEL).fst
+	@rm -rf sim_build $(SIM_BUILD)/results.xml
