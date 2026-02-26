@@ -14,7 +14,8 @@
  */
 module fpga_core_10g #
 (
-    parameter TARGET = "GENERIC"
+    parameter TARGET = "GENERIC",
+    parameter B2B_EN = 0           // 0=external XGMII, 1=internal cross-connect
 )
 (
     /*
@@ -22,7 +23,7 @@ module fpga_core_10g #
      */
     input  wire        clk,
     input  wire        rst,
-
+    input  wire        trigger_b,
     /*
      * Node A — XGMII (connected to Node B + External Injection)
      */
@@ -108,23 +109,30 @@ wire        node_a_udp_tx_ext_tready;
 wire        node_a_udp_tx_ext_tlast;
 wire        node_a_udp_tx_ext_tuser;
 
-// =========================================================================
-// Node A — RX Mux/Merge Logic
-// Inject external traffic (xgmii_a_*) OR B2B traffic (node_b_*)
-// =========================================================================
-// For XGMII, IDLE is generally 0x07 on data and 0xFF on control.
-// Simple way to mux: if external has non-idle control/data, use it; else use B.
-// This requires true XGMII routing, but since it's a testbench mux, we can just OR
-// if we make sure the "inactive" driver sends 0 instead of standard idle.
-// However, standard XGMII idle is non-zero (0x07 with txc=0xFF or similar).
-// We'll trust the external testbench will send standard idle when not injecting.
-// For true loopback simplicity without complex XGMII parsing:
-wire external_act_a = (xgmii_a_rxc != 8'hff);
-wire b2b_act_a      = (node_b_xgmii_txc != 8'hff);
 
-wire        node_a_rx_clk = b2b_act_a ? node_b_xgmii_tx_clk : xgmii_a_rx_clk;
-wire [63:0] node_a_rxd    = b2b_act_a ? node_b_xgmii_txd : xgmii_a_rxd;
-wire [7:0]  node_a_rxc    = b2b_act_a ? node_b_xgmii_txc : xgmii_a_rxc;
+wire [63:0] node_b_udp_rx_ext_tdata;
+wire [7:0]  node_b_udp_rx_ext_tkeep;
+wire        node_b_udp_rx_ext_tvalid;
+wire        node_b_udp_rx_ext_tready;
+wire        node_b_udp_rx_ext_tlast;
+wire        node_b_udp_rx_ext_tuser;
+
+wire [63:0] node_b_udp_tx_ext_tdata;
+wire [7:0]  node_b_udp_tx_ext_tkeep;
+wire        node_b_udp_tx_ext_tvalid;
+wire        node_b_udp_tx_ext_tready;
+wire        node_b_udp_tx_ext_tlast;
+wire        node_b_udp_tx_ext_tuser;
+
+
+// =========================================================================
+// Node A — RX Source Selection
+// b2b_en=1: Node A RX ← Node B TX (internal cross-connect, clk domain)
+// b2b_en=0: Node A RX ← External XGMII (xgmii_a_rx_clk domain)
+// =========================================================================
+wire        node_a_rx_clk = B2B_EN ? clk              : xgmii_a_rx_clk;
+wire [63:0] node_a_rxd    = B2B_EN ? node_b_xgmii_txd : xgmii_a_rxd;
+wire [7:0]  node_a_rxc    = B2B_EN ? node_b_xgmii_txc : xgmii_a_rxc;
 
 // =========================================================================
 // Node A — UDP 10G MAC with Ethernet APB Configuration
@@ -213,15 +221,13 @@ assign node_a_udp_tx_ext_tkeep = 8'hFF;
 
 
 // =========================================================================
-// Node B — RX Mux/Merge Logic
-// Inject external traffic (xgmii_b_*) OR B2B traffic (node_a_*)
+// Node B — RX Source Selection
+// b2b_en=1: Node B RX ← Node A TX (internal cross-connect, clk domain)
+// b2b_en=0: Node B RX ← External XGMII (xgmii_b_rx_clk domain)
 // =========================================================================
-wire external_act_b = (xgmii_b_rxc != 8'hff);
-wire b2b_act_b      = (node_a_xgmii_txc != 8'hff);
-
-wire        node_b_rx_clk = b2b_act_b ? node_a_xgmii_tx_clk : xgmii_b_rx_clk;
-wire [63:0] node_b_rxd    = b2b_act_b ? node_a_xgmii_txd : xgmii_b_rxd;
-wire [7:0]  node_b_rxc    = b2b_act_b ? node_a_xgmii_txc : xgmii_b_rxc;
+wire        node_b_rx_clk = B2B_EN ? clk              : xgmii_b_rx_clk;
+wire [63:0] node_b_rxd    = B2B_EN ? node_a_xgmii_txd : xgmii_b_rxd;
+wire [7:0]  node_b_rxc    = B2B_EN ? node_a_xgmii_txc : xgmii_b_rxc;
 
 // =========================================================================
 // Node B — UDP 10G MAC with Ethernet APB Configuration
@@ -248,25 +254,47 @@ mac_udp_10G_apbConfig #(
     .pready  (pready_b),
     .pslverr (pslverr_b),
 
-    .udp_rx_ext_tdata (),
-    .udp_rx_ext_tkeep (),
-    .udp_rx_ext_tvalid(),
-    .udp_rx_ext_tready(1'b1),
-    .udp_rx_ext_tlast (),
-    .udp_rx_ext_tuser (),
+    .udp_rx_ext_tdata (node_b_udp_rx_ext_tdata),
+    .udp_rx_ext_tkeep (node_b_udp_rx_ext_tkeep),
+    .udp_rx_ext_tvalid(node_b_udp_rx_ext_tvalid),
+    .udp_rx_ext_tready(node_b_udp_rx_ext_tready),
+    .udp_rx_ext_tlast (node_b_udp_rx_ext_tlast),
+    .udp_rx_ext_tuser (node_b_udp_rx_ext_tuser),
 
-    .udp_tx_ext_tdata (64'd0),
-    .udp_tx_ext_tkeep (8'd0),
-    .udp_tx_ext_tvalid(1'b0),
-    .udp_tx_ext_tready(),
-    .udp_tx_ext_tlast (1'b0),
-    .udp_tx_ext_tuser (1'b0)
+    .udp_tx_ext_tdata (node_b_udp_tx_ext_tdata),
+    .udp_tx_ext_tkeep (node_b_udp_tx_ext_tkeep),
+    .udp_tx_ext_tvalid(node_b_udp_tx_ext_tvalid),
+    .udp_tx_ext_tready(node_b_udp_tx_ext_tready),
+    .udp_tx_ext_tlast (node_b_udp_tx_ext_tlast),
+    .udp_tx_ext_tuser (node_b_udp_tx_ext_tuser)
 );
 
 // Node B TX → external XGMII port (monitoring)
 assign xgmii_b_tx_clk= node_b_xgmii_tx_clk;
 assign xgmii_b_txd   = node_b_xgmii_txd;
 assign xgmii_b_txc   = node_b_xgmii_txc;
+
+
+udp_axi_data_gen #(
+    .DATA_WIDTH (64)
+) node_b_udp_gen (
+    .clk  (clk),
+    .rst  (rst),
+    .trigger(trigger_b),
+    .s_axis_tdata  (node_b_udp_rx_ext_tdata),
+    .s_axis_tvalid (node_b_udp_rx_ext_tvalid),
+    .s_axis_tready (node_b_udp_rx_ext_tready),
+    .s_axis_tlast  (node_b_udp_rx_ext_tlast),
+    .s_axis_tuser  (node_b_udp_rx_ext_tuser),
+
+    .m_axis_tdata  (node_b_udp_tx_ext_tdata),
+    .m_axis_tvalid (node_b_udp_tx_ext_tvalid),
+    .m_axis_tready (node_b_udp_tx_ext_tready),
+    .m_axis_tlast  (node_b_udp_tx_ext_tlast),
+    .m_axis_tuser  (node_b_udp_tx_ext_tuser)
+);
+
+assign node_b_udp_tx_ext_tkeep = 8'hFF;
 
 endmodule
 

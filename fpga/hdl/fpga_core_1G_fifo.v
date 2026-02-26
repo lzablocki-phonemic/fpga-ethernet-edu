@@ -11,7 +11,8 @@
 
 module fpga_core_1G_fifo #
 (
-    parameter TARGET = "GENERIC"
+    parameter TARGET = "GENERIC",
+    parameter B2B_EN = 0           // 0=external GMII, 1=internal cross-connect
 )
 (
     /*
@@ -97,17 +98,25 @@ wire [7:0]  mac_b_txd_int;
 wire        mac_b_tx_en_int;
 wire        mac_b_tx_er_int;
 
-// Connect External GMII RX to Node A unless B is talking
-wire        mac_a_rx_clk_in = (gmii_a_rx_dv || gmii_a_rx_er) ? gmii_a_rx_clk : mac_b_tx_clk_int;
-wire [7:0]  mac_a_rxd_in    = (gmii_a_rx_dv || gmii_a_rx_er) ? gmii_a_rxd    : mac_b_txd_int;
-wire        mac_a_rx_dv_in  = (gmii_a_rx_dv || gmii_a_rx_er) ? gmii_a_rx_dv  : mac_b_tx_en_int;
-wire        mac_a_rx_er_in  = (gmii_a_rx_dv || gmii_a_rx_er) ? gmii_a_rx_er  : mac_b_tx_er_int;
+// =========================================================================
+// Node A — RX Source Selection
+// B2B_EN=1: Node A RX ← Node B TX (internal cross-connect, clk domain)
+// B2B_EN=0: Node A RX ← External GMII
+// =========================================================================
+wire        mac_a_rx_clk_in = B2B_EN ? clk              : gmii_a_rx_clk;
+wire [7:0]  mac_a_rxd_in    = B2B_EN ? mac_b_txd_int    : gmii_a_rxd;
+wire        mac_a_rx_dv_in  = B2B_EN ? mac_b_tx_en_int  : gmii_a_rx_dv;
+wire        mac_a_rx_er_in  = B2B_EN ? mac_b_tx_er_int  : gmii_a_rx_er;
 
-// Connect External GMII RX to Node B unless A is talking
-wire        mac_b_rx_clk_in = (gmii_b_rx_dv || gmii_b_rx_er) ? gmii_b_rx_clk : mac_a_tx_clk_int;
-wire [7:0]  mac_b_rxd_in    = (gmii_b_rx_dv || gmii_b_rx_er) ? gmii_b_rxd    : mac_a_txd_int;
-wire        mac_b_rx_dv_in  = (gmii_b_rx_dv || gmii_b_rx_er) ? gmii_b_rx_dv  : mac_a_tx_en_int;
-wire        mac_b_rx_er_in  = (gmii_b_rx_dv || gmii_b_rx_er) ? gmii_b_rx_er  : mac_a_tx_er_int;
+// =========================================================================
+// Node B — RX Source Selection
+// B2B_EN=1: Node B RX ← Node A TX (internal cross-connect, clk domain)
+// B2B_EN=0: Node B RX ← External GMII
+// =========================================================================
+wire        mac_b_rx_clk_in = B2B_EN ? clk              : gmii_b_rx_clk;
+wire [7:0]  mac_b_rxd_in    = B2B_EN ? mac_a_txd_int    : gmii_b_rxd;
+wire        mac_b_rx_dv_in  = B2B_EN ? mac_a_tx_en_int  : gmii_b_rx_dv;
+wire        mac_b_rx_er_in  = B2B_EN ? mac_a_tx_er_int  : gmii_b_rx_er;
 
 // Connect output to external ports unconditionally for monitoring/capture
 assign gmii_a_tx_clk = mac_a_tx_clk_int;

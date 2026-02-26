@@ -119,6 +119,7 @@ wire [31:0] subnet_mask     = config_regs[APB_IDX_SUBNET_MASK];
 
 wire [15:0] src_port_cfg    = config_regs[APB_IDX_SRC_PORT][15:0];
 wire [15:0] dst_port_cfg    = config_regs[APB_IDX_DST_PORT][15:0];
+wire [31:0] dst_ip_cfg      = config_regs[APB_IDX_DST_IP];
 
 // =========================================================================
 // Internal AXI-Stream Wires
@@ -352,18 +353,51 @@ always @(posedge clk) begin
 end
 
 // =========================================================================
-// UDP Header Handling
+// External TX Origination FSM
+// Detects when udp_tx_ext_tvalid rises without a pending RX header,
+// generates a one-cycle header-valid pulse from APB-configured fields.
 // =========================================================================
-assign tx_udp_hdr_valid       = rx_udp_hdr_valid && port_match;
+reg ext_tx_hdr_valid = 0;   // one-cycle pulse
+reg ext_tx_active    = 0;   // stays high while originating packet
+
+always @(posedge clk) begin
+    if (rst) begin
+        ext_tx_hdr_valid <= 0;
+        ext_tx_active    <= 0;
+    end else begin
+        ext_tx_hdr_valid <= 0; // default: pulse off
+
+        if (!ext_tx_active && !route_loopback) begin
+            // Detect start of externally-originated packet
+            if (udp_tx_ext_tvalid && !rx_udp_hdr_valid) begin
+                ext_tx_hdr_valid <= 1;
+                ext_tx_active    <= 1;
+            end
+        end else if (ext_tx_active) begin
+            // Wait for the TX payload to complete (tlast handshake)
+            if (tx_udp_payload_axis_tvalid && tx_udp_payload_axis_tready && tx_udp_payload_axis_tlast) begin
+                ext_tx_active <= 0;
+            end
+        end
+    end
+end
+
+// =========================================================================
+// UDP Header Handling
+// Muxes between RX-response headers and ext-origination headers
+// =========================================================================
+wire rx_response_hdr = rx_udp_hdr_valid && port_match;
+
+assign tx_udp_hdr_valid       = rx_response_hdr || ext_tx_hdr_valid;
 assign rx_udp_hdr_ready       = (tx_eth_hdr_ready && port_match) || no_match;
 assign tx_udp_ip_dscp         = 0;
 assign tx_udp_ip_ecn          = 0;
 assign tx_udp_ip_ttl          = 64;
 assign tx_udp_ip_source_ip    = local_ip;
-assign tx_udp_ip_dest_ip      = rx_udp_ip_source_ip;
-assign tx_udp_source_port     = rx_udp_dest_port;
-assign tx_udp_dest_port       = rx_udp_source_port;
-assign tx_udp_length          = rx_udp_length;
+assign tx_udp_ip_dest_ip      = ext_tx_active ? dst_ip_cfg         : rx_udp_ip_source_ip;
+assign tx_udp_source_port     = ext_tx_active ? src_port_cfg       : rx_udp_dest_port;
+assign tx_udp_dest_port       = ext_tx_active ? dst_port_cfg       : rx_udp_source_port;
+assign tx_udp_length          = ext_tx_active ? 16'd1008           : rx_udp_length;
 assign tx_udp_checksum        = 0;
 
 // =========================================================================

@@ -10,12 +10,16 @@ COCOTB_HDL_TIMEPRECISION = 1ps
 
 DUT      = fpga_core_10g
 TOPLEVEL = $(DUT)
-MODULE   = test_$(DUT)
+MODULE   ?= test_$(DUT)
 
 # Project root (relative to fpga/tests/)
 PROJ_ROOT = ../..
 
+# Python module path (for xgmii_sniffer etc.)
+export PYTHONPATH := $(PWD)/../python:$(PYTHONPATH)
+
 # Source directories
+TB_DIR     = $(PROJ_ROOT)/fpga/tb
 HDL_DIR     = $(PROJ_ROOT)/fpga/hdl
 APB_CFG_DIR = $(PROJ_ROOT)/ip/eth_apb/hdl
 APB_CFG_BASE_DIR = $(PROJ_ROOT)/ip/apb_configurator/hdl
@@ -23,6 +27,7 @@ FIR_DIR     = $(PROJ_ROOT)/ip/fir/hdl
 ETH_LIB_DIR = $(PROJ_ROOT)/external/verilog-ethernet
 
 # Verilog sources
+VERILOG_SOURCES += $(TB_DIR)/udp_axi_data_gen.v
 VERILOG_SOURCES += $(HDL_DIR)/fpga_core_10g.v
 VERILOG_SOURCES += $(APB_CFG_DIR)/mac_udp_10G_apbConfig.v
 VERILOG_SOURCES += $(APB_CFG_BASE_DIR)/apb_configurator.v
@@ -60,9 +65,12 @@ VERILOG_SOURCES += $(ETH_LIB_DIR)/lib/axis/rtl/axis_async_fifo_adapter.v
 SIM_BUILD ?= $(PWD)/../sim
 
 export COCOTB_RESULTS_FILE = $(SIM_BUILD)/results.xml
+# B2B mode: 0=external XGMII (default), 1=internal cross-connect
+B2B_EN ?= 0
 
 ifeq ($(SIM), icarus)
 	PLUSARGS += -fst
+	COMPILE_ARGS += -Pfpga_core_10g.B2B_EN=$(B2B_EN)
 
 	ifeq ($(WAVES), 1)
 		VERILOG_SOURCES += iverilog_dump.v

@@ -3,42 +3,62 @@ Testbench for fpga_core_1G_fifo
 """
 
 import logging
+import os
 
 from scapy.layers.l2 import Ether, ARP
 from scapy.layers.inet import IP, UDP
 
 import cocotb
-from cocotb.log import SimLog
 from cocotb.clock import Clock
-from cocotb.triggers import RisingEdge
+from cocotb.triggers import RisingEdge, Timer
 
-from cocotbext.eth import GmiiFrame, GmiiSource, GmiiSink
+from cocotbext.eth import GmiiFrame
+from gmii_compat import GmiiSource, GmiiSink
+from xgmii_sniffer import XgmiiSniffer
 
 
 class TB:
     def __init__(self, dut):
         self.dut = dut
 
-        self.log = SimLog("cocotb.tb")
+        # Set signals to known values BEFORE creating GMII objects
+        dut.rst.setimmediatevalue(0)
+        dut.gmii_a_rx_clk.setimmediatevalue(0)
+        dut.gmii_b_rx_clk.setimmediatevalue(0)
+
+        self.log = logging.getLogger("cocotb.tb")
         self.log.setLevel(logging.DEBUG)
 
         # 1G runs at 125 MHz (8.0 ns period)
         cocotb.start_soon(Clock(dut.clk, 8.0, units="ns").start())
 
-        # GMII Ethernet Sources and Sinks
-        # Using the target Node A external ports
+        # GMII Sources: drive RX inputs (safe to create early, we control the signals)
         self.gmii_source_a = GmiiSource(dut.gmii_a_rxd, dut.gmii_a_rx_er, dut.gmii_a_rx_dv,
-                                        dut.gmii_a_rx_clk, dut.rst)
-        self.gmii_sink_a = GmiiSink(dut.gmii_a_txd, dut.gmii_a_tx_er, dut.gmii_a_tx_en,
-                                    dut.gmii_a_tx_clk, dut.rst)
+                                        dut.gmii_a_rx_clk)
+                                        
+        self.gmii_source_b = GmiiSource(dut.gmii_b_rxd, dut.gmii_b_rx_er, dut.gmii_b_rx_dv,
+                                        dut.gmii_b_rx_clk)
 
-        pass
+        # GMII Sinks: created in init() after reset, to avoid Logic('Z') on TX outputs
+        self.gmii_sink_a = None
+        self.gmii_sink_a_pcap = None
+        self.gmii_sink_b = None
+
+        self.sniffers = {}
+
+    def start_sniffer(self):
+        self.sniffer = XgmiiSniffer('Node_A_TX', self.gmii_sink_a_pcap, self.log)
+        self.sniffers = {"Node_A_TX": self.sniffer}
+
+    def save_pcaps(self, prefix='1G_fifo'):
+        pcap_dir = os.path.join(os.path.dirname(__file__), '..', 'sim')
+        os.makedirs(pcap_dir, exist_ok=True)
+        for name, sniffer in self.sniffers.items():
+            sniffer.stop()
+            path = os.path.join(pcap_dir, f'{prefix}_{name}.pcap')
+            sniffer.write_pcap(path)
 
     async def init(self):
-        self.dut.rst.setimmediatevalue(0)
-        self.dut.gmii_a_rx_clk.setimmediatevalue(0)
-        self.dut.gmii_b_rx_clk.setimmediatevalue(0)
-
         for k in range(10):
             await RisingEdge(self.dut.clk)
 
@@ -48,6 +68,28 @@ class TB:
             await RisingEdge(self.dut.clk)
 
         self.dut.rst.value = 0
+
+        # Wait a few clocks for RTL TX outputs to settle (no longer Z)
+        for k in range(5):
+            await RisingEdge(self.dut.clk)
+
+        # Now safe to create GMII Sinks (TX outputs are driven by the MAC)
+        self.gmii_sink_a = GmiiSink(self.dut.gmii_a_txd, self.dut.gmii_a_tx_er, self.dut.gmii_a_tx_en,
+                                    self.dut.gmii_a_tx_clk)
+        self.gmii_sink_a_pcap = GmiiSink(self.dut.gmii_a_txd, self.dut.gmii_a_tx_er, self.dut.gmii_a_tx_en,
+                                    self.dut.gmii_a_tx_clk)                                    
+        self.gmii_sink_b = GmiiSink(self.dut.gmii_b_txd, self.dut.gmii_b_tx_er, self.dut.gmii_b_tx_en,
+                                    self.dut.gmii_b_tx_clk)
+
+        # Drain any stale frames from async FIFOs (left over from previous tests)
+        for k in range(50):
+            await RisingEdge(self.dut.clk)
+        
+    async def drain_rx_fifos(self):
+        while not self.gmii_sink_a.empty():
+            self.gmii_sink_a.recv_nowait()
+        while not self.gmii_sink_b.empty():
+            self.gmii_sink_b.recv_nowait()
 
     async def apb_write(self, sel, addr, data):
         psel = getattr(self.dut, f"psel_{sel}")
@@ -134,6 +176,25 @@ class TB:
         # Basic readback verification
         readback_ip = await self.apb_read("a", 0x18)
         assert readback_ip == 0xC0A80101, f"APB Readback error: expected 0xC0A80101, got {hex(readback_ip)}"
+
+    async def setup_mac_b(self, loopback=False):
+        """Configure Node B via APB."""
+        self.log.info(f"Configure APB for Node B (loopback={loopback})")
+
+        ctrl_val = 0
+        if loopback: ctrl_val |= 1
+        await self.apb_write("b", 0x00, ctrl_val)
+        # Configure local MAC: 02:00:00:00:00:02
+        await self.apb_write("b", 0x08, 0x00000002)  # SRC_MAC_L
+        await self.apb_write("b", 0x0C, 0x00000200)  # SRC_MAC_H
+        # Configure IPs: 192.168.1.2
+        await self.apb_write("b", 0x18, 0xC0A80102)  # SRC_IP
+        await self.apb_write("b", 0x1C, 0xC0A80101)  # DST_IP
+        await self.apb_write("b", 0x28, 0xC0A80101)  # GATEWAY_IP
+        await self.apb_write("b", 0x2C, 0xFFFFFF00)  # SUBNET_MASK
+        # Configure UDP ports
+        await self.apb_write("b", 0x24, 1234)         # DST_PORT
+        await self.apb_write("b", 0x20, 1234)         # SRC_PORT
 
     async def setup_fir_a(self, coeffs):
         self.log.info("Configure FIR for Node A")
@@ -255,10 +316,12 @@ async def test_fir_processing(dut):
 
     # Configure Node A to NOT loopback
     await tb.setup_mac_a(loopback=False)
-
+    await tb.drain_rx_fifos()
+    
     # Configure FIR to multiply by 2 and disable bypass
     await tb.setup_fir_a([2, 0, 0, 0])
     await tb.setup_fir_bypass(bypass=False)
+    tb.start_sniffer()
 
     tb.log.info("Test UDP RX packet forwarding via FIR on Node A")
 
@@ -290,9 +353,14 @@ async def test_fir_processing(dut):
     # The returned payload should be exactly the source multiplied by 2!
     expected_payload_bytes = bytes([x * 2 for x in payload_bytes])
     
+    tb.save_pcaps(prefix='1G_fifo')
+
+
     assert rx_pkt.dst == '5a:51:52:53:54:55'
     assert rx_pkt[UDP].payload.load[:32] == expected_payload_bytes[:32], f"FIR failed to multiply! Expected {expected_payload_bytes[:32].hex()}, got {rx_pkt[UDP].payload.load[:32].hex()}"
     
     tb.log.info("Successfully validated FIR multiplier forward mode on Node A")
     for _ in range(100):
         await RisingEdge(dut.clk)
+
+

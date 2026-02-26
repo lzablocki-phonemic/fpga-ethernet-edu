@@ -18,7 +18,7 @@ from scapy.layers.inet import IP, UDP
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import RisingEdge
+from cocotb.triggers import RisingEdge, Timer
 
 from cocotbext.eth import XgmiiFrame, XgmiiSource, XgmiiSink
 
@@ -27,26 +27,29 @@ class TB:
     def __init__(self, dut):
         self.dut = dut
 
+        # Set signals to known values before creating XGMII objects
+        dut.rst.setimmediatevalue(0)
+        dut.xgmii_a_rx_clk.setimmediatevalue(0)
+        dut.xgmii_b_rx_clk.setimmediatevalue(0)
+        dut.trigger_b.setimmediatevalue(0)
+
         self.log = logging.getLogger("cocotb.tb")
         self.log.setLevel(logging.DEBUG)
 
         cocotb.start_soon(Clock(dut.clk, 6.4, units="ns").start())
 
-        # Ethernet
-        self.xgmii_source_a = XgmiiSource(dut.xgmii_a_rxd, dut.xgmii_a_rxc, dut.clk, dut.rst)
-        self.xgmii_sink_a = XgmiiSink(dut.xgmii_a_txd, dut.xgmii_a_txc, dut.clk, dut.rst)
+        # Ethernet (pass reset=None to avoid cocotbext-eth Logic('Z') crash)
+        self.xgmii_source_a = XgmiiSource(dut.xgmii_a_rxd, dut.xgmii_a_rxc, dut.clk)
+        self.xgmii_sink_a = XgmiiSink(dut.xgmii_a_txd, dut.xgmii_a_txc, dut.clk)
+        self.xgmii_source_b = XgmiiSource(dut.xgmii_b_rxd, dut.xgmii_b_rxc, dut.clk)
+        self.xgmii_sink_b = XgmiiSink(dut.xgmii_b_txd, dut.xgmii_b_txc, dut.clk)
 
-        # APB is driven directly
-        pass
 
     async def init(self):
-        self.dut.rst.setimmediatevalue(0)
-        self.dut.xgmii_a_rx_clk.setimmediatevalue(0)
-        self.dut.xgmii_b_rx_clk.setimmediatevalue(0)
 
         for k in range(10):
             await RisingEdge(self.dut.clk)
-
+    
         self.dut.rst.value = 1
 
         for k in range(10):
@@ -103,6 +106,62 @@ class TB:
         penable.value = 0
         return data
 
+
+    async def trigger_udp_b(self):
+        self.log.info(f"Trigger UDP for Node B (loopback)")
+        trigger_udp = getattr(self.dut, "trigger_b")
+       
+        await RisingEdge(self.dut.clk)
+        trigger_udp.value = 1 
+        await RisingEdge(self.dut.clk)
+        trigger_udp.value = 0
+        await RisingEdge(self.dut.clk)
+
+
+    async def setup_mac_b(self, loopback=True):
+        self.log.info(f"Configure APB for Node B (loopback={loopback})")
+        
+        self.dut.psel_a.value = 0
+        self.dut.penable_a.value = 0
+        self.dut.pwrite_a.value = 0
+        self.dut.paddr_a.value = 0
+        self.dut.pwdata_a.value = 0
+
+        self.dut.psel_b.value = 0
+        self.dut.penable_b.value = 0
+        self.dut.pwrite_b.value = 0
+        self.dut.paddr_b.value = 0
+        self.dut.pwdata_b.value = 0
+
+        self.dut.psel_fir_a.value = 0
+        self.dut.penable_fir_a.value = 0
+        self.dut.pwrite_fir_a.value = 0
+        self.dut.paddr_fir_a.value = 0
+        self.dut.pwdata_fir_a.value = 0
+
+        await RisingEdge(self.dut.clk)
+        
+        ctrl_val = 0
+        if loopback: ctrl_val |= 1
+        await self.apb_write("b", 0x00, ctrl_val)
+        # Configure local MAC: 02:00:00:00:00:02
+        await self.apb_write("b", 0x08, 0x00000002) # SRC_MAC_L
+        await self.apb_write("b", 0x0C, 0x00000200) # SRC_MAC_H
+        # Configure IPs: 192.168.1.2
+        await self.apb_write("b", 0x18, 0xC0A80102) # SRC_IP
+        await self.apb_write("b", 0x1c, 0xC0A80101) # DST_IP
+
+        await self.apb_write("b", 0x28, 0xC0A80102) # GATEWAY_IP
+        await self.apb_write("b", 0x2C, 0xFFFFFF00) # SUBNET_MASK
+        # Configure UDP ports
+        await self.apb_write("b", 0x24, 1234)       # DST_PORT
+        await self.apb_write("b", 0x20, 1234)       # SRC_PORT
+
+        # Basic readback verification
+        readback_ip = await self.apb_read("a", 0x18)
+        assert readback_ip == 0xC0A80101, f"APB Readback error: expected 0xC0A80101, got {hex(readback_ip)}"
+
+
     async def setup_mac_a(self, loopback=True):
         self.log.info(f"Configure APB for Node A (loopback={loopback})")
         
@@ -134,6 +193,7 @@ class TB:
         await self.apb_write("a", 0x0C, 0x00000200) # SRC_MAC_H
         # Configure IPs: 192.168.1.1
         await self.apb_write("a", 0x18, 0xC0A80101) # SRC_IP
+        await self.apb_write("a", 0x1c, 0xC0A80102) # DST_IP
         await self.apb_write("a", 0x28, 0xC0A80102) # GATEWAY_IP
         await self.apb_write("a", 0x2C, 0xFFFFFF00) # SUBNET_MASK
         # Configure UDP ports
@@ -160,7 +220,7 @@ class TB:
     async def send_and_receive_udp(self, payload, sport=5678, dport=1234):
         """Send a UDP packet and return the received UDP response, handling ARP."""
         eth = Ether(src='5a:51:52:53:54:55', dst='02:00:00:00:00:00')
-        ip = IP(src='192.168.1.100', dst='192.168.1.1')
+        ip = IP(src='192.168.1.2', dst='192.168.1.1')
         udp = UDP(sport=sport, dport=dport)
         test_pkt = eth / ip / udp / payload
 
@@ -173,7 +233,7 @@ class TB:
             self.log.info("Handling ARP request")
             eth_arp = Ether(src='5a:51:52:53:54:55', dst='02:00:00:00:00:01')
             arp = ARP(hwtype=1, ptype=0x0800, hwlen=6, plen=4, op=2,
-                hwsrc='5a:51:52:53:54:55', psrc='192.168.1.100',
+                hwsrc='5a:51:52:53:54:55', psrc='192.168.1.2',
                 hwdst='02:00:00:00:00:01', pdst='192.168.1.1')
             await self.xgmii_source_a.send(XgmiiFrame.from_payload((eth_arp / arp).build()))
             rx_frame = await self.xgmii_sink_a.recv()
@@ -286,7 +346,7 @@ async def test_mac_loopback(dut):
 
     payload = bytes([x % 256 for x in range(64)])
     eth = Ether(src='5a:51:52:53:54:55', dst='02:00:00:00:00:00')
-    ip = IP(src='192.168.1.100', dst='192.168.1.1')
+    ip = IP(src='192.168.1.2', dst='192.168.1.1')
     udp = UDP(sport=1234, dport=1234)
     test_pkt = eth / ip / udp / payload
 
@@ -302,7 +362,7 @@ async def test_mac_loopback(dut):
     
     eth_arp = Ether(src='5a:51:52:53:54:55', dst='02:00:00:00:00:01')
     arp = ARP(hwtype=1, ptype=0x0800, hwlen=6, plen=4, op=2,
-        hwsrc='5a:51:52:53:54:55', psrc='192.168.1.100',
+        hwsrc='5a:51:52:53:54:55', psrc='192.168.1.2',
         hwdst='02:00:00:00:00:01', pdst='192.168.1.1')
     await tb.xgmii_source_a.send(XgmiiFrame.from_payload((eth_arp / arp).build()))
         
@@ -335,7 +395,7 @@ async def test_fir_loopback(dut):
 
     payload = bytes([x % 256 for x in range(64)])
     eth = Ether(src='5a:51:52:53:54:55', dst='02:00:00:00:00:00')
-    ip = IP(src='192.168.1.100', dst='192.168.1.1')
+    ip = IP(src='192.168.1.2', dst='192.168.1.1')
     udp = UDP(sport=1235, dport=1234)
     test_pkt = eth / ip / udp / payload
 
@@ -351,7 +411,7 @@ async def test_fir_loopback(dut):
     
     eth_arp = Ether(src='5a:51:52:53:54:55', dst='02:00:00:00:00:01')
     arp = ARP(hwtype=1, ptype=0x0800, hwlen=6, plen=4, op=2,
-        hwsrc='5a:51:52:53:54:55', psrc='192.168.1.100',
+        hwsrc='5a:51:52:53:54:55', psrc='192.168.1.2',
         hwdst='02:00:00:00:00:01', pdst='192.168.1.1')
     await tb.xgmii_source_a.send(XgmiiFrame.from_payload((eth_arp / arp).build()))
         
@@ -391,7 +451,7 @@ async def test_fir_processing(dut):
     payload_bytes = [x for x in range(32)]
     payload = bytes(payload_bytes)
     eth = Ether(src='5a:51:52:53:54:55', dst='02:00:00:00:00:00')
-    ip = IP(src='192.168.1.100', dst='192.168.1.1')
+    ip = IP(src='192.168.1.2', dst='192.168.1.1')
     udp = UDP(sport=5678, dport=1234)
     test_pkt = eth / ip / udp / payload
     
@@ -403,7 +463,7 @@ async def test_fir_processing(dut):
     if ARP in rx_pkt:
         eth_arp = Ether(src='5a:51:52:53:54:55', dst='02:00:00:00:00:01')
         arp = ARP(hwtype=1, ptype=0x0800, hwlen=6, plen=4, op=2,
-            hwsrc='5a:51:52:53:54:55', psrc='192.168.1.100',
+            hwsrc='5a:51:52:53:54:55', psrc='192.168.1.2',
             hwdst='02:00:00:00:00:01', pdst='192.168.1.1')
         await tb.xgmii_source_a.send(XgmiiFrame.from_payload((eth_arp / arp).build()))
         rx_frame = await tb.xgmii_sink_a.recv()
@@ -841,4 +901,3 @@ async def test_fir_lowpass_1500B(dut):
     tb.log.info("PASS: FIR low-pass on 1472B UDP packet verified")
     for _ in range(100):
         await RisingEdge(dut.clk)
-

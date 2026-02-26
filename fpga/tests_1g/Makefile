@@ -10,10 +10,14 @@ COCOTB_HDL_TIMEPRECISION = 1ps
 
 DUT      = fpga_core_1G_fifo
 TOPLEVEL = $(DUT)
-MODULE   = test_$(DUT)
+MODULE   ?= test_$(DUT)
 
 # Project root (relative to fpga/tests_1g/)
 PROJ_ROOT = ../..
+
+# Python module path (for xgmii_sniffer etc.)
+export PYTHONPATH := $(PWD)/../python:$(PYTHONPATH)
+
 
 # Source directories
 HDL_DIR     = $(PROJ_ROOT)/fpga/hdl
@@ -61,8 +65,15 @@ SIM_BUILD ?= $(PWD)/../sim
 
 export COCOTB_RESULTS_FILE = $(SIM_BUILD)/results.xml
 
+# B2B mode: 0=external GMII (default), 1=internal cross-connect
+B2B_EN ?= 0
+
+# Python module path (for xgmii_sniffer etc.)
+export PYTHONPATH := $(PWD)/../python:$(PYTHONPATH)
+
 ifeq ($(SIM), icarus)
 	PLUSARGS += -fst
+	COMPILE_ARGS += -Pfpga_core_1G_fifo.B2B_EN=$(B2B_EN)
 
 	ifeq ($(WAVES), 1)
 		VERILOG_SOURCES += iverilog_dump.v
